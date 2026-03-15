@@ -1,0 +1,23 @@
+# Python environment
+venv/
+.venv/
+.rag_env/
+
+# environment variables
+.env
+*.log
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VS Code settings
+.vscode/
+
+# model files
+models/
+*.bin
+
+# RAG specific files
+data/
+outputs/
+qdrant_data/
