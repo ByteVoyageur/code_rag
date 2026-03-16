@@ -1,183 +1,163 @@
-"""
-Chunker for Markdown files.
+"""Markdown chunking utilities and CLI export script."""
 
-Usage:
-    python src/chunkers/chunk_md.py
-"""
+from __future__ import annotations
 
-from pathlib import Path
 import json
+from pathlib import Path
 
-ROOT_DIR = Path(__file__).parent.parent.parent
+ROOT_DIR = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT_DIR / "data" / "kdk" / "docs"
-OUTPUT_DIR = ROOT_DIR / "outputs" / "md_chunks.jsonl"
+OUTPUT_PATH = ROOT_DIR / "outputs" / "md_chunks.jsonl"
 
-def read_one_md_file():
-    test_file = DOCS_DIR / "about" / "introduction.md"
-    text = test_file.read_text(encoding="utf-8")
-    print(f"file path: {test_file}")
-    print(f"file size: {len(text)} characters")
-    print(f"file content 200 lignes: ")
-    print(text[:200])
 
-def find_all_md_files():
-    list_md_files = []
-    md_files = list(DOCS_DIR.rglob("*.md"))
-    print(f"Found {len(md_files)} Markdown files in {DOCS_DIR}")
-    for md_file in md_files:
-        list_md_files.append(md_file)
-    print(f"Total Markdown files found: {len(list_md_files)}")    
-    print(f"First 5 Markdown files: {list_md_files[:5]}")
-
-def split_md_file_by_two_dieses():
-    test_file = DOCS_DIR / "about" / "introduction.md"
-    text = test_file.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    chunks = []
-    current_title = None
-    current_chunk = []
-    
-    for line in lines:
-        if line.startswith("## "):
-            if current_lines:
-                chunks.append(
-                    {
-                        "title": current_title,
-                        "content": "\n".join(current_chunk)
-                    }
-
-                )
-            current_title = line[3:].strip()  # Remove "## " prefix
-            current_chunk = []
-        else:
-            current_chunk.append(line)
-
-    # Append the last chunk if it exists
-    if current_chunk:
-        chunks.append(
-            {
-                "title": current_title,
-                "content": "\n".join(current_chunk)
-            }
-            
-        )
-    print(f"Total chunks created: {len(chunks)}")
-    for i, chunk in enumerate(chunks[:3]):
-        print(f"Chunk {i+1} (length: {len(chunk['content'])} characters):")
-        print(f"Title: {chunk['title']}")
-        print(chunk['content'][:200])  # Print first 200 characters of each chunk
-        print("\n---\n")
-
-def add_metadata_to_chunks():
-    test_file = DOCS_DIR / "about" / "introduction.md"
-    text = test_file.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    doc_title = test_file.stem
+def extract_doc_title(lines: list[str], fallback: str) -> str:
+    """Extract the first H1 title from a markdown file."""
     for line in lines:
         if line.startswith("# ") and not line.startswith("## "):
-            doc_title = line[2:].strip()
-            break
+            return line[2:].strip()
+    return fallback
 
-    chunks = []
+
+def split_oversized_chunk(
+    text: str,
+    metadata: dict,
+    max_chars: int,
+) -> list[dict]:
+    """Split an oversized chunk on paragraph and line boundaries."""
+    stripped = text.strip()
+    if not stripped or len(stripped) <= max_chars:
+        return [{"text": stripped, "metadata": metadata}]
+
+    pieces: list[dict] = []
+    paragraphs = [part.strip() for part in stripped.split("\n\n") if part.strip()]
+    current = ""
+    part_idx = 1
+
+    def flush() -> None:
+        nonlocal current, part_idx
+        if not current.strip():
+            return
+        part_metadata = dict(metadata)
+        if part_idx > 1:
+            part_metadata["section_title"] = f"{metadata['section_title']} (part {part_idx})"
+        pieces.append({"text": current.strip(), "metadata": part_metadata})
+        current = ""
+        part_idx += 1
+
+    for paragraph in paragraphs:
+        candidate = paragraph if not current else f"{current}\n\n{paragraph}"
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+
+        flush()
+
+        if len(paragraph) <= max_chars:
+            current = paragraph
+            continue
+
+        lines = [line for line in paragraph.splitlines() if line.strip()]
+        current_line_block = ""
+        for line in lines:
+            candidate_line = line if not current_line_block else f"{current_line_block}\n{line}"
+            if len(candidate_line) <= max_chars:
+                current_line_block = candidate_line
+                continue
+
+            if current_line_block:
+                current = current_line_block
+                flush()
+                current_line_block = ""
+
+            start = 0
+            while start < len(line):
+                segment = line[start:start + max_chars]
+                current = segment
+                flush()
+                start += max_chars
+
+        if current_line_block:
+            current = current_line_block
+            flush()
+
+    flush()
+    return pieces
+
+
+def chunk_markdown_file(filepath: Path, docs_dir: Path, max_chars: int | None = None) -> list[dict]:
+    """Chunk a single markdown file by H2 sections, with optional max-length fallback splitting."""
+    text = filepath.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    rel_path = str(filepath.relative_to(docs_dir))
+    doc_title = extract_doc_title(lines, filepath.stem)
+
+    chunks: list[dict] = []
     current_title = doc_title
-    current_chunk = []
-    
+    current_lines: list[str] = []
+
+    def append_chunk(section_title: str, raw_lines: list[str]) -> None:
+        if not raw_lines:
+            return
+        chunk = {
+            "text": "\n".join(raw_lines).strip(),
+            "metadata": {
+                "source": rel_path,
+                "doc_title": doc_title,
+                "section_title": section_title,
+            },
+        }
+        if max_chars is None:
+            chunks.append(chunk)
+        else:
+            chunks.extend(split_oversized_chunk(chunk["text"], chunk["metadata"], max_chars))
+
     for line in lines:
         if line.startswith("## "):
-            if current_chunk:
-                chunks.append(
-                    {
-                        "text": "\n".join(current_chunk).strip(),
-                        "metadata": {
-                            "source": str(test_file.relative_to(DOCs_DIR)),
-                            "doc_title": doc_title,
-                            "section_title": current_title,
-                        }
-                    }
-                )
-            current_title = line[3:].strip()  # Remove "## " prefix
-            current_chunk = []
+            append_chunk(current_title, current_lines)
+            current_title = line[3:].strip()
+            current_lines = [line]
         else:
-            current_chunk.append(line)
+            current_lines.append(line)
 
-    # Append the last chunk if it exists
-    if current_chunk:
-        chunks.append(
-            {
-                "text": "\n".join(current_chunk).strip(),
-                "metadata": {
-                    "source": str(test_file.relative_to(DOCS_DIR)),
-                    "doc_title": doc_title,
-                    "section_title": current_title,
-                }
-            }
-        )
-    
-    print(f"Total chunks created: {len(chunks)}")
-    for i, chunk in enumerate(chunks[:3]):
-        print(f"Chunk {i+1} (length: {len(chunk['text'])} characters):")
-        print(f"Metadata: {chunk['metadata']}")
-        print(chunk['text'][:200])  # Print first 200 characters of each chunk
-        print("\n---\n")
+    append_chunk(current_title, current_lines)
+    return chunks
 
-def step6_process_all_and_save():
-    md_files = sorted(DOCS_DIR.rglob("*.md"))
-    OUTPUT_DIR.parent.mkdir(parents=True, exist_ok=True)
 
-    total_chunks = 0
-    with OUTPUT_DIR.open("w", encoding="utf-8") as out:
-        for filepath in md_files:
-            text = filepath.read_text(encoding="utf-8")
-            lines = text.splitlines()
-            rel_path = filepath.relative_to(DOCS_DIR)
+def chunk_markdown_corpus(docs_dir: Path, max_chars: int | None = None) -> list[dict]:
+    """Chunk all markdown files in a directory tree."""
+    all_chunks: list[dict] = []
+    for filepath in sorted(docs_dir.rglob("*.md")):
+        all_chunks.extend(chunk_markdown_file(filepath, docs_dir, max_chars=max_chars))
+    return all_chunks
 
-            # find F1 title as doc_title
-            doc_title = filepath.stem
-            for line in lines:
-                if line.startswith("# ") and not line.startswith("## "):
-                    doc_title = line[2:].strip()
-                    break
 
-            current_title = doc_title
-            current_lines = []
-
-            for line in lines:
-                if line.startswith("## "):
-                    if current_lines:
-                        chunk = {
-                            "text": "\n".join(current_lines).strip(),
-                            "metadata": {
-                                "source": str(rel_path),
-                                "doc_title": doc_title,
-                                "section_title": current_title,
-                            },
-                        }
-                        out.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-                        total_chunks += 1
-                    current_title = line[3:].strip()
-                    current_lines = [line]
-                else:
-                    current_lines.append(line)
-
-            if current_lines:
-                chunk = {
-                    "text": "\n".join(current_lines).strip(),
-                    "metadata": {
-                        "source": str(rel_path),
-                        "doc_title": doc_title,
-                        "section_title": current_title,
-                    },
-                }
+def save_chunks_jsonl(chunks: list[dict], output_path: Path) -> None:
+    """Atomically replace the output file to avoid partial writes on failure."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as out:
+            for chunk in chunks:
                 out.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-                total_chunks += 1
+        temp_path.replace(output_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
-    print(f"处理了 {len(md_files)} 个文件")
-    print(f"写入了 {total_chunks} 个 chunks")
-    print(f"输出文件: {OUTPUT_DIR}")
+
+def step6_process_all_and_save(
+    docs_dir: Path = DOCS_DIR,
+    output_path: Path = OUTPUT_PATH,
+    max_chars: int | None = None,
+) -> list[dict]:
+    """Process the markdown corpus and save chunks to JSONL."""
+    chunks = chunk_markdown_corpus(docs_dir, max_chars=max_chars)
+    save_chunks_jsonl(chunks, output_path)
+    print(f"Processed {len(list(docs_dir.rglob('*.md')))} markdown files")
+    print(f"Wrote {len(chunks)} chunks")
+    print(f"Output file: {output_path}")
+    return chunks
+
 
 if __name__ == "__main__":
-    read_one_md_file()
-    find_all_md_files()
-    split_md_file_by_two_dieses()
-    add_metadata_to_chunks()
     step6_process_all_and_save()

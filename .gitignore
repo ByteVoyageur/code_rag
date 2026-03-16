@@ -22,3 +22,6 @@ models/
 data/
 outputs/
 qdrant_data/
+
+# cache and temporary files
+__pycache__/
