@@ -2,6 +2,7 @@
 venv/
 .venv/
 .rag_env/
+.python-version
 
 # environment variables
 .env
